@@ -1,6 +1,6 @@
 # Laser Optimizer Suite 🚀
 
-A comprehensive, industrial-grade framework for optimizing toolpaths in dual-mode laser machining systems (Slow Platform + Fast Galvo). 
+A comprehensive, framework for optimizing toolpaths in two-layer laser machining systems (Slow Platform + Fast Galvo). 
 
 This suite unifies three evolutionary stages of the algorithm—from a basic Python prototype to a high-performance C++ production engine—under a single management API.
 
@@ -11,7 +11,7 @@ LaserOptimizerSuite/
 ├── manager.py              # Central Command API (Installer & Launcher)
 ├── inputs/                 # Drop your .svg patterns here
 ├── outputs/                # Generated G-Code (.gcode) and Visualizations (.html)
-├── doc/                    # Research documentation, essays, and thesis
+├── docs/                    # Research documentation, essays, and thesis
 │
 └── engines/                # The Solvers
     ├── py_v1/              # Basic Prototype (Python)
@@ -76,9 +76,9 @@ All commands are executed via `manager.py`:
 
 ## 📄 Documentation
 
-Detailed algorithmic analysis, mathematical proofs, and the final essay are located in the **`doc/`** directory.
+Detailed algorithmic analysis, mathematical proofs, and the final essay are located in the **`docs/`** directory.
 
-*   **`doc/`**: Contains the theoretical basis and performance benchmarks.
+*   **`docs/`**: Contains the theoretical basis and performance benchmarks.
 *   **`outputs/`**: Contains the visual proof of optimization (HTML interactive dashboards).
 
 ## 📝 License
