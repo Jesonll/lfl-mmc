@@ -1,0 +1,17 @@
+{
+    "machine": {
+        "platform_speed": 0.25,
+        "galvo_mark_speed": 2.5,
+        "galvo_jump_speed": 5.0,
+        "galvo_field_size": 0.2
+    },
+    "optimization": {
+        "pso_particles": 20,
+        "pso_iterations": 40,
+        "time_penalty_weight": 9999999.0
+    },
+    "process": {
+        "svg_scale_factor": 0.001,
+        "canvas_size_m": 1.0
+    }
+}

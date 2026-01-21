@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.pytest_cache/
+
+# --- C++ / CMake Build Artifacts ---
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.a
+*.o
+*.dylib
+*.so
+*.dll
+compile_commands.json
+
+# --- Specific Engine Artifacts ---
+# Ignore the build folder and downloaded deps inside the C++ engine
+engines/cpp_v3/build/
+engines/cpp_v3/_deps/
+
+# --- Project Outputs ---
+# Ignore generated GCode and HTML visualization, but keep the folder
+outputs/*
+!outputs/.gitkeep
+
+# --- IDE & OS Settings ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
