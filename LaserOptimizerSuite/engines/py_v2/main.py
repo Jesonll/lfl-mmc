@@ -4,11 +4,14 @@ import os
 import sys
 import numpy as np
 import copy
+import time
 
+# Add current directory to path so imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from core.svg_loader import SVGLoader
 from core.upper_layer import UpperLayerOptimizer
+from core.lower_layer import LowerLayerSolver
 from core.visualization import plot_results
 from core.exporter import GCodeExporter
 
@@ -19,28 +22,52 @@ def load_config(path):
 def normalize_paths(paths, target_width, target_height):
     if not paths: return paths
     print(f"[Process] Normalizing pattern to fit {target_width}m x {target_height}m...")
+    
+    # --- 1. FLIP Y AXIS (Fix Upside Down) ---
+    # SVG has Y going down. CNC has Y going up.
+    # We flip immediately before calculating bounds.
+    for p in paths:
+        p.points[:, 1] = -p.points[:, 1]
+
+    # --- 2. CALCULATE BOUNDS ---
     all_pts = np.vstack([p.points for p in paths])
     min_xy = np.min(all_pts, axis=0)
     max_xy = np.max(all_pts, axis=0)
+    
     curr_w = max_xy[0] - min_xy[0]
     curr_h = max_xy[1] - min_xy[1]
+    
     if curr_w < 1e-9: curr_w = 1.0
     if curr_h < 1e-9: curr_h = 1.0
+    
+    # --- 3. DETERMINE SCALE ---
     scale = min(target_width / curr_w, target_height / curr_h)
     print(f"          Scale Factor: {scale:.4f}")
+    
+    # --- 4. SHIFT TO (0,0) AND SCALE ---
     for p in paths:
+        # Subtracting min_xy (which might be negative after flip) moves everything to 0+
         p.points = (p.points - min_xy) * scale
+        
+        # Recalculate length after scaling
         p.length = np.sum(np.sqrt(np.sum(np.diff(p.points, axis=0)**2, axis=1)))
+        
     return paths
 
 def tile_paths(paths, nx, ny, spacing_x=0.05, spacing_y=0.05):
     tiled_paths = []
     pid_counter = 0
+    
+    # Recalculate bounds of the normalized single pattern
     all_pts = np.vstack([p.points for p in paths])
     min_xy = np.min(all_pts, axis=0)
     max_xy = np.max(all_pts, axis=0)
-    w, h = max_xy[0] - min_xy[0], max_xy[1] - min_xy[1]
-    step_x, step_y = w + spacing_x, h + spacing_y
+    w = max_xy[0] - min_xy[0]
+    h = max_xy[1] - min_xy[1]
+    
+    step_x = w + spacing_x
+    step_y = h + spacing_y
+    
     print(f"[Process] Tiling input {nx}x{ny}...")
     for iy in range(ny):
         for ix in range(nx):
@@ -54,45 +81,132 @@ def tile_paths(paths, nx, ny, spacing_x=0.05, spacing_y=0.05):
                 pid_counter += 1
     return tiled_paths
 
+def calculate_detailed_metrics(paths, stay_points, allocations, sequence, config):
+    t_plat, t_jump, t_mark = 0.0, 0.0, 0.0
+    v_plat = config['machine']['platform_speed']
+    v_mark = config['machine']['galvo_mark_speed']
+    v_jump = config['machine']['galvo_jump_speed']
+    
+    current_plat = np.array([0.0, 0.0]) 
+    
+    for sp_idx in sequence:
+        sp_pos = stay_points[sp_idx]
+        t_plat += np.linalg.norm(sp_pos - current_plat) / v_plat + 0.1 # Add settle time
+        current_plat = sp_pos
+        
+        cluster_indices = np.where(allocations == sp_idx)[0]
+        cluster_paths = [paths[i] for i in cluster_indices]
+        
+        solver = LowerLayerSolver(cluster_paths, sp_pos, config)
+        _, micro_sequence = solver.solve()
+        
+        current_galvo = np.array([0.0, 0.0])
+        for p_idx, reverse in micro_sequence:
+            path = cluster_paths[p_idx]
+            local_pts = path.points - sp_pos
+            start = local_pts[-1] if reverse else local_pts[0]
+            end = local_pts[0] if reverse else local_pts[-1]
+            
+            t_jump += np.linalg.norm(start - current_galvo) / v_jump
+            t_mark += path.length / v_mark
+            current_galvo = end
+            
+    return t_plat, t_jump, t_mark
+
 def main():
+    # --- START WALL CLOCK ---
+    wall_start = time.time()
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, help="Path to SVG")
     parser.add_argument('--config', type=str, default='config.json')
     parser.add_argument('--output', type=str, default='output.gcode')
     parser.add_argument('--tile', type=int, default=1)
     parser.add_argument('--target_size', type=float, nargs=2)
+    parser.add_argument('--segment_len', type=float, default=0.05)
     args = parser.parse_args()
 
-    if not os.path.exists(args.config):
-        print("Config not found.")
-        return
+    if not os.path.exists(args.config): return
     config = load_config(args.config)
 
+    # 1. Load
+    print("[1/5] Loading SVG...")
+    load_start = time.time()
     if args.input and os.path.exists(args.input):
-        paths = SVGLoader.load_svg(args.input, scale=1.0, sampling_resolution=50.0)
+        paths = SVGLoader.load_svg(args.input, scale=1.0, segment_len_mm=args.segment_len)
     else:
         paths = SVGLoader.generate_mock_data()
+    print(f"      Loaded in {time.time() - load_start:.2f}s")
     
     if not paths: return
 
+    # 2. Normalize (WITH Y-FLIP FIX)
     if args.target_size:
         paths = normalize_paths(paths, args.target_size[0], args.target_size[1])
     else:
+        # Simple scaling fallback
         cfg_scale = config['process']['svg_scale_factor']
-        if abs(cfg_scale - 1.0) > 1e-6:
-            for p in paths: p.points *= cfg_scale
+        for p in paths:
+            p.points[:, 1] = -p.points[:, 1] # Ensure flip happens even in fallback
+        
+        # Determine shift after flip
+        all_pts = np.vstack([p.points for p in paths])
+        min_xy = np.min(all_pts, axis=0)
+        
+        for p in paths:
+            p.points = (p.points - min_xy) * cfg_scale
+            p.length = np.sum(np.sqrt(np.sum(np.diff(p.points, axis=0)**2, axis=1)))
 
+    # 3. Tile
     if args.tile > 1:
         paths = tile_paths(paths, args.tile, args.tile, spacing_x=0.02, spacing_y=0.02)
 
+    # 4. Optimize
+    print(f"[3/5] Optimizing {len(paths)} vectors (PSO)...")
+    opt_start = time.time()
     optimizer = UpperLayerOptimizer(paths, config)
-    
-    # --- CHANGED: Unpack 5 values (including sequence) ---
-    best_stay_points, allocations, sequence, best_time, history = optimizer.optimize()
+    best_stay_points, allocations, sequence, best_time_score, history = optimizer.optimize()
+    print(f"      Optimization took {time.time() - opt_start:.2f}s")
 
-    print(f"\nOptimization Complete. Best Time: {best_time:.4f}s")
+    # 5. Calculate Metrics
+    t_plat, t_jump, t_mark = calculate_detailed_metrics(paths, best_stay_points, allocations, sequence, config)
+    total_physical_time = t_plat + t_jump + t_mark
+
+    # --- STOP WALL CLOCK ---
+    wall_end = time.time()
+    total_wall_clock = wall_end - wall_start
+
+    # --- ACCURACY CALC ---
+    total_points = sum(len(p.points) for p in paths)
+    total_length = sum(p.length for p in paths)
+    avg_seg_len_mm = (total_length * 1000.0 / total_points) if total_points > 0 else 0.0
+
+    # 6. Save Metrics JSON
+    metrics = {
+        "engine": "py_v2",
+        "vector_count": len(paths),
+        "island_count": len(best_stay_points),
+        "geo_resolution_mm": avg_seg_len_mm,
+        "time_compute_sec": total_wall_clock,
+        "time_platform_sec": t_plat,
+        "time_jump_sec": t_jump,
+        "time_mark_sec": t_mark,
+        "time_total_machine_sec": total_physical_time
+    }
     
-    # --- CHANGED: Pass sequence to Exporter and Visualizer ---
+    metrics_path = args.output + ".json"
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=4)
+
+    print(f"\n=== PERFORMANCE REPORT ===")
+    print(f"Total Wall Clock:  {total_wall_clock:.2f} s")
+    print(f"Machine Work:      {total_physical_time:.2f} s")
+    print(f"  - Platform:      {t_plat:.2f} s")
+    print(f"  - Jump (OFF):    {t_jump:.2f} s")
+    print(f"  - Mark (ON):     {t_mark:.2f} s")
+    print(f"Resolution:        {avg_seg_len_mm:.4f} mm")
+    print(f"==========================")    
+
     GCodeExporter.export(args.output, paths, best_stay_points, allocations, config, sequence=sequence)
     plot_results(paths, best_stay_points, allocations, history, config, sequence=sequence)
 

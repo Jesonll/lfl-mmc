@@ -17,7 +17,7 @@ class LaserPath:
 
 class SVGLoader:
     @staticmethod
-    def load_svg(filepath: str, scale: float = 0.001, sampling_resolution: float = 50.0) -> List[LaserPath]:
+    def load_svg(filepath: str, scale: float = 1.0, segment_len_mm: float = 0.05) -> List[LaserPath]:
         """
         sampling_resolution: Points per unit length. 
         Increased default to 50.0 to handle small coordinate SVGs (1x1) smoothly.
@@ -31,6 +31,11 @@ class SVGLoader:
 
         paths = []
         path_counter = 0
+        target_len_m = segment_len_mm / 1000.0
+        if target_len_m < 1e-6: target_len_m = 0.00005
+        
+        sampling_resolution = 1.0 / target_len_m 
+
 
         def add_path(pts_list):
             nonlocal path_counter

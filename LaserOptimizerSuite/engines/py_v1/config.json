@@ -6,8 +6,8 @@
         "galvo_field_size": 0.2
     },
     "optimization": {
-        "pso_particles": 20,
-        "pso_iterations": 40,
+        "pso_particles": 50,
+        "pso_iterations": 50,
         "time_penalty_weight": 9999999.0
     },
     "process": {

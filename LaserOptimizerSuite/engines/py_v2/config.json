@@ -7,7 +7,7 @@
     },
     "optimization": {
         "pso_particles": 50,
-        "pso_iterations": 100,
+        "pso_iterations": 50,
         "time_penalty_weight": 9999999.0
     },
     "process": {
