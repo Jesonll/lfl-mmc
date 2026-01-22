@@ -1,10 +1,10 @@
 /**
- * LASER SPEED PLANNER v3.6 (C++17)
+ * LASER SPEED PLANNER v4.0 (C++17)
  * 
- * UPDATE:
- * - Rich G-Code Headers (Job Sheet)
- * - Absolute Path Logging
- * - HTML Export Fixes
+ * FIXES:
+ * - G-Code Optimization: Removes redundant Jumps (Zero-distance moves).
+ * - Viewer Compatibility: Re-added "; Platform" tag so the viewer renders correctly.
+ * - Precision: High-resolution float handling.
  */
 
 #include <iostream>
@@ -19,12 +19,13 @@
 #include <iomanip>
 #include <cstring>
 #include <cctype>
+#include <cstdlib>
 #include <omp.h>
 #include <Eigen/Dense>
 #include <fmt/core.h>
 
 // --- CORE TYPES ---
-using Vec2 = Eigen::Vector2f; // Float for memory efficiency
+using Vec2 = Eigen::Vector2f;
 using Float = float; 
 
 struct Segment {
@@ -59,6 +60,8 @@ struct Config {
     Float target_h = 0.0f;
     Float segment_len_mm = 0.05f; 
     
+    int tile_n = 1; 
+
     std::string input_file = "";
     std::string html_file = "result.html";
     std::string gcode_file = "output.gcode";
@@ -69,6 +72,8 @@ struct Config {
         if (target_w > 0) 
             fmt::print("Normalization:    Fit to {:.3f}m x {:.3f}m\n", target_w, target_h);
         fmt::print("Target Accuracy:  {:.4f} mm\n", segment_len_mm);
+        if (tile_n > 1)
+            fmt::print("Tiling:           {} x {} Grid\n", tile_n, tile_n);
         fmt::print("---------------------\n");
     }
 };
@@ -242,10 +247,15 @@ private:
     static void add_transformed(std::vector<Segment>& segs, int& id, Vec2 raw_p1, Vec2 raw_p2, Vec2 offset, Float scale) {
         Float len = (raw_p2 - raw_p1).norm();
         if (len < 1e-9f) return;
+        
+        // 1. Normalize
         Vec2 p1 = (raw_p1 - offset) * scale;
         Vec2 p2 = (raw_p2 - offset) * scale;
-        p1.y() = -p1.y(); // Y-Flip
+        
+        // 2. Y-Flip for MACHINE COORDINATES (Y+ Up)
+        p1.y() = -p1.y();
         p2.y() = -p2.y();
+        
         segs.push_back({id++, p1, p2, (p2-p1).norm()});
     }
 
@@ -265,6 +275,42 @@ private:
             add_transformed(segs, id, prev, pos, offset, scale);
             prev = pos;
         }
+    }
+};
+
+// --- MODULE 1.5: TILER ---
+class Tiler {
+public:
+    static void tile(std::vector<Segment>& segments, int n_tile, Float spacing_m) {
+        if (n_tile <= 1) return;
+        
+        Vec2 min_pt(1e15f, 1e15f), max_pt(-1e15f, -1e15f);
+        for(const auto& s : segments) {
+            min_pt = min_pt.cwiseMin(s.start.cwiseMin(s.end));
+            max_pt = max_pt.cwiseMax(s.start.cwiseMax(s.end));
+        }
+        Float w = max_pt.x() - min_pt.x();
+        Float h = max_pt.y() - min_pt.y();
+        
+        fmt::print("[Proc] Tiling {}x{} grid (Spacing {:.3f}m)...\n", n_tile, n_tile, spacing_m);
+        
+        std::vector<Segment> tiles;
+        tiles.reserve(segments.size() * n_tile * n_tile);
+        
+        int id_counter = 0;
+        for(int iy=0; iy<n_tile; ++iy) {
+            for(int ix=0; ix<n_tile; ++ix) {
+                Vec2 offset(ix * (w + spacing_m), iy * (h + spacing_m));
+                for(const auto& s : segments) {
+                    Segment ns = s;
+                    ns.id = id_counter++;
+                    ns.start += offset;
+                    ns.end += offset;
+                    tiles.push_back(ns);
+                }
+            }
+        }
+        segments = tiles;
     }
 };
 
@@ -390,7 +436,7 @@ public:
     }
 };
 
-// --- MODULE 6: METRICS ---
+// --- MODULE 6: EXPORTERS ---
 class MetricsExporter {
 public:
     static void save(const std::string& filename, double ms, double t_plat, double t_jump, double t_mark, int segs, int islands, double total_len) {
@@ -409,84 +455,130 @@ public:
     static void export_html(const Config& cfg, const std::vector<Segment>& segments, const std::vector<Island>& islands, const std::vector<int>& order) {
         std::ofstream out(cfg.html_file);
         if(!out.is_open()) return;
+
         Float min_x=1e9f, max_x=-1e9f, min_y=1e9f, max_y=-1e9f;
         for(const auto& s : segments) {
             min_x=std::min({min_x,s.start.x(),s.end.x()}); max_x=std::max({max_x,s.start.x(),s.end.x()});
             min_y=std::min({min_y,s.start.y(),s.end.y()}); max_y=std::max({max_y,s.start.y(),s.end.y()});
         }
-        Float pad=(max_x-min_x)*0.05f, w=(max_x-min_x)+2*pad, h=(max_y-min_y)+2*pad;
-        out << R"(<html><body style="background:#111"><svg viewBox=")" << min_x-pad << " " << min_y-pad << " " << w << " " << h << R"(" style="border:1px solid #444">)";
+        
+        Float w_data = max_x - min_x;
+        Float h_data = max_y - min_y;
+        Float pad = std::max(0.01f, w_data * 0.05f);
+        Float w_view = w_data + 2*pad;
+        Float h_view = h_data + 2*pad;
+        Float field = cfg.field_size;
+
+        out << R"(<html><body style="background:#111; color:#888; font-family:sans-serif;">)";
+        out << "<h3>" << cfg.input_file << "</h3>";
+        
+        out << fmt::format(R"(<svg width='100%' height='90vh' viewBox='{} {} {} {}' style="border:1px solid #444">)",
+            min_x - pad, 
+            -max_y - pad, 
+            w_view, 
+            h_view);
+            
+        out << R"(<g transform=\"scale(1, -1)\">)";
+
+        // Platform Path
+        out << "<path fill='none' stroke='#00aaff' stroke-width='" << w_view/800.0 << "' stroke-dasharray='" << w_view/100.0 << "' d='M";
+        for(size_t i=0; i<order.size(); ++i) {
+            Vec2 p = islands[order[i]].center;
+            out << " " << p.x() << " " << -p.y() << (i==order.size()-1 ? "'" : " L");
+        }
+        out << "/>\n";
+
         for(int idx : order) {
-            for(auto& n : islands[idx].optimized_path) {
-                auto& s = segments[n.segment_idx];
-                out << "<line x1='" << s.start.x() << "' y1='" << s.start.y() << "' x2='" << s.end.x() << "' y2='" << s.end.y() << "' stroke='#f04' stroke-width='" << w/1000.0 << "'/>";
+            const auto& isl = islands[idx];
+            Float cx = isl.center.x(), cy = -isl.center.y();
+            out << fmt::format("<rect x='{}' y='{}' width='{}' height='{}' fill='none' stroke='#00aaff' stroke-width='{}' opacity='0.3' />\n",
+                cx - field/2, cy - field/2, field, field, w_view/1500.0);
+            
+            Vec2 head = isl.center;
+            for(const auto& node : isl.optimized_path) {
+                const auto& seg = segments[node.segment_idx];
+                Vec2 start = node.reverse ? seg.end : seg.start;
+                Vec2 end   = node.reverse ? seg.start : seg.end;
+                
+                // --- OPTIMIZATION: REMOVE ZERO-LENGTH JUMPS ---
+                // If head matches start (within tolerance), skip drawing the jump
+                Float jump_dist = (start - head).norm();
+                if (jump_dist > 0.0001f) {
+                    out << fmt::format("<line x1='{}' y1='{}' x2='{}' y2='{}' stroke='#555' stroke-width='{}' stroke-dasharray='{}' />\n",
+                        head.x(), -head.y(), start.x(), -start.y(), w_view/2500.0, w_view/200.0);
+                }
+                
+                out << fmt::format("<line x1='{}' y1='{}' x2='{}' y2='{}' stroke='#ff3366' stroke-width='{}' />\n",
+                    start.x(), -start.y(), end.x(), -end.y(), w_view/1000.0);
+                    
+                head = end;
             }
         }
-        out << "</svg></body></html>";
+        out << "</g></svg></body></html>";
     }
 
-    static void export_gcode(const Config& cfg, const std::vector<Segment>& segments, 
-                             const std::vector<Island>& islands, const std::vector<int>& order,
-                             double total_time) 
-    {
+    static void export_gcode(const Config& cfg, const std::vector<Segment>& segments, const std::vector<Island>& islands, const std::vector<int>& order, double total_time) {
         std::ofstream out(cfg.gcode_file);
-        
-        // --- RICH HEADER (The "Explanatory Note") ---
-        out << "; ========================================\n";
-        out << "; LASER SPEED PLANNER JOB SHEET\n";
-        out << "; ========================================\n";
-        out << "; Input File:    " << cfg.input_file << "\n";
-        out << "; Total Time:    " << std::fixed << std::setprecision(2) << total_time << " s\n";
-        out << "; Vector Count:  " << segments.size() << "\n";
-        out << "; Stations:      " << islands.size() << "\n";
-        out << "; ----------------------------------------\n";
-        out << "; SETTINGS:\n";
-        out << ";   Platform:    " << cfg.platform_speed << " m/s\n";
-        out << ";   Mark Speed:  " << cfg.galvo_mark_speed << " m/s\n";
-        out << ";   Jump Speed:  " << cfg.galvo_jump_speed << " m/s\n";
-        out << ";   Field Size:  " << cfg.field_size << " m\n";
-        out << "; ========================================\n\n";
-        
-        out << "G21 ; Units: Millimeters\n";
-        out << "G90 ; Absolute Positioning\n";
+        out << "; Generated by LaserSpeedPlanner v4.0\n";
+        out << "; Total Time: " << std::fixed << std::setprecision(2) << total_time << " s\n";
+        out << "G21\nG90\n";
         
         for(int idx : order) {
             auto& isl = islands[idx];
-            out << "\n; --- Station " << isl.id << " ---\n";
-            out << fmt::format("G0 X{:.3f} Y{:.3f} F{:.0f} ; Move Platform\n", isl.center.x()*1000, isl.center.y()*1000, cfg.platform_speed*60000);
-            out << "M0 ; Settle\n";
+            
+            // --- FIX: ADD ; Platform TAG ---
+            // This is critical for the Python viewer to distinguish Stage vs Galvo
+            out << fmt::format("\n; Station {}\nG0 X{:.3f} Y{:.3f} F{:.0f} ; Platform\nM0\n", 
+                isl.id, isl.center.x()*1000, isl.center.y()*1000, cfg.platform_speed*60000);
+            
+            Vec2 head = isl.center; // Track logical head pos relative to island
+            
             for(auto& n : isl.optimized_path) {
                 auto& s = segments[n.segment_idx];
                 Vec2 start = n.reverse ? s.end : s.start;
                 Vec2 end = n.reverse ? s.start : s.end;
                 Vec2 rs = start - isl.center, re = end - isl.center;
-                out << fmt::format("G0 X{:.3f} Y{:.3f} ; Jump\n", rs.x()*1000, rs.y()*1000);
-                out << "M3 ; On\n";
-                out << fmt::format("G1 X{:.3f} Y{:.3f} ; Cut\n", re.x()*1000, re.y()*1000);
-                out << "M5 ; Off\n";
+                
+                // --- OPTIMIZATION: REMOVE ZERO-LENGTH JUMPS ---
+                // Only write G0 if distance > epsilon
+                if ((start - head).norm() > 0.00001f) {
+                    out << fmt::format("G0 X{:.3f} Y{:.3f}\n", rs.x()*1000, rs.y()*1000);
+                }
+                
+                out << "M3\n";
+                out << fmt::format("G1 X{:.3f} Y{:.3f}\n", re.x()*1000, re.y()*1000);
+                out << "M5\n";
+                
+                head = end;
             }
         }
-        out << "M2 ; End\n";
+        out << "M2\n";
     }
 };
 
 // --- MAIN ---
-Float safe_arg(char** argv, int& i, int argc) {
+Float safe_arg_float(char** argv, int& i, int argc) {
     if (i + 1 >= argc) return 0.0f;
     try { return std::stof(argv[++i]); } catch(...) { return 0.0f; }
+}
+
+int safe_arg_int(char** argv, int& i, int argc) {
+    if (i + 1 >= argc) return 1;
+    try { return std::stoi(argv[++i]); } catch(...) { return 1; }
 }
 
 Config parse_args(int argc, char** argv) {
     Config cfg;
     for(int i=1; i<argc; ++i) {
         std::string s = argv[i];
-        if (s == "--platform_speed") cfg.platform_speed = safe_arg(argv, i, argc);
-        else if (s == "--galvo_mark_speed") cfg.galvo_mark_speed = safe_arg(argv, i, argc);
-        else if (s == "--galvo_jump_speed") cfg.galvo_jump_speed = safe_arg(argv, i, argc);
-        else if (s == "--galvo_field_size") cfg.field_size = safe_arg(argv, i, argc);
-        else if (s == "--svg_scale_factor") cfg.svg_scale_factor = safe_arg(argv, i, argc);
-        else if (s == "--segment_len") cfg.segment_len_mm = safe_arg(argv, i, argc);
-        else if (s == "--normalize") { cfg.target_w = safe_arg(argv, i, argc); cfg.target_h = safe_arg(argv, i, argc); }
+        if (s == "--platform_speed") cfg.platform_speed = safe_arg_float(argv, i, argc);
+        else if (s == "--galvo_mark_speed") cfg.galvo_mark_speed = safe_arg_float(argv, i, argc);
+        else if (s == "--galvo_jump_speed") cfg.galvo_jump_speed = safe_arg_float(argv, i, argc);
+        else if (s == "--galvo_field_size") cfg.field_size = safe_arg_float(argv, i, argc);
+        else if (s == "--svg_scale_factor") cfg.svg_scale_factor = safe_arg_float(argv, i, argc);
+        else if (s == "--segment_len") cfg.segment_len_mm = safe_arg_float(argv, i, argc);
+        else if (s == "--normalize") { cfg.target_w = safe_arg_float(argv, i, argc); cfg.target_h = safe_arg_float(argv, i, argc); }
+        else if (s == "--tile") cfg.tile_n = safe_arg_int(argv, i, argc);
         else if (s == "--gcode_output") cfg.gcode_file = argv[++i];
         else if (s == "--output") cfg.html_file = argv[++i];
         else if (s[0] != '-') cfg.input_file = s;
@@ -501,6 +593,8 @@ int main(int argc, char** argv) {
     auto segments = SVGLoader::load_and_normalize(cfg);
     if(segments.empty()) return 1;
     cfg.print();
+
+    if(cfg.tile_n > 1) Tiler::tile(segments, cfg.tile_n, 0.02f);
 
     auto start = std::chrono::high_resolution_clock::now();
 

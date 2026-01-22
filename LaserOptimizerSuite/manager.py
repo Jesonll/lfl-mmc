@@ -47,7 +47,9 @@ def install_system(args):
     build_dir = os.path.join(ENGINES_DIR, "cpp_v3", "build")
     if os.path.exists(build_dir) and args.clean: shutil.rmtree(build_dir)
     os.makedirs(build_dir, exist_ok=True)
-    run_command(["cmake", ".."], cwd=build_dir)
+    
+    cmake = "cmake3" if shutil.which("cmake3") else "cmake"
+    run_command([cmake, ".."], cwd=build_dir)
     run_command(["make", f"-j{os.cpu_count() or 1}"], cwd=build_dir)
     print("[✓] Ready.")
 
@@ -56,7 +58,18 @@ def run_job(args):
     input_path = os.path.abspath(args.input) if os.path.exists(args.input) else os.path.join(INPUT_DIR, args.input)
     if not os.path.exists(input_path): print("[!] Input not found."); sys.exit(1)
 
+    # --- FLATTEN STEP (Crucial for Transforms) ---
     base_name = os.path.splitext(os.path.basename(input_path))[0]
+    flat_svg = os.path.join(OUTPUT_DIR, f"{base_name}_flat.svg")
+    flatten_script = os.path.join(ENGINES_DIR, "common", "flatten.py")
+    
+    active_input = input_path # Default to raw
+    if os.path.exists(flatten_script):
+        # Always run flattening to ensure coordinates are baked
+        run_command([sys.executable, flatten_script, input_path, flat_svg])
+        if os.path.exists(flat_svg):
+            active_input = flat_svg
+            
     out_gcode = os.path.join(OUTPUT_DIR, f"{base_name}_{args.engine}.gcode")
     out_html = os.path.join(OUTPUT_DIR, f"{base_name}_{args.engine}.html")
     
@@ -70,7 +83,7 @@ def run_job(args):
         if not os.path.exists(exe): print("[!] Run install first."); sys.exit(1)
         
         cmd = [
-            exe, input_path,
+            exe, active_input, # <--- USE FLATTENED INPUT
             "--gcode_output", out_gcode,
             "--output", out_html,
             "--segment_len", str(args.segment_len),
@@ -81,12 +94,17 @@ def run_job(args):
         ]
         if args.width: cmd.extend(["--normalize", str(args.width), str(args.height)])
         else: cmd.extend(["--svg_scale_factor", str(args.scale)])
+        if args.tile > 1: cmd.extend(["--tile", str(args.tile)])
 
     elif args.engine in ["v1", "v2"]:
-        # (Python logic same as before, simplified for brevity)
         engine_dir = os.path.join(ENGINES_DIR, f"py_{args.engine}")
         cwd = engine_dir
-        cmd = [sys.executable, "main.py", "--input", input_path, "--output", out_gcode, "--segment_len", str(args.segment_len)]
+        cmd = [
+            sys.executable, "main.py", 
+            "--input", active_input,  # <--- FIX: USE FLATTENED INPUT
+            "--output", out_gcode, 
+            "--segment_len", str(args.segment_len)
+        ]
         if args.width: cmd.extend(["--target_size", str(args.width), str(args.height)])
         if args.tile > 1: cmd.extend(["--tile", str(args.tile)])
 

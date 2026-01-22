@@ -1,6 +1,6 @@
 # Laser Optimizer Suite 🚀
 
-A comprehensive, framework for optimizing toolpaths in two-layer laser machining systems (Slow Platform + Fast Galvo). 
+A comprehensive framework for optimizing toolpaths in two-layer laser machining systems (Slow Platform + Fast Galvo). 
 
 This suite unifies three evolutionary stages of the algorithm—from a basic Python prototype to a high-performance C++ production engine—under a single management API.
 
@@ -60,7 +60,7 @@ python3 manager.py run input.svg --engine v2 --width 0.15 --height 0.15 --tile 3
 
 ## 🎮 Command Line Arguments
 
-All commands are executed via `manager.py`:
+All commands are executed via `manager.py`, following are some frequently used:
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
