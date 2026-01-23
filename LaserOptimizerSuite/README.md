@@ -9,6 +9,7 @@ This suite unifies three evolutionary stages of the algorithm—from a basic Pyt
 ```text
 LaserOptimizerSuite/
 ├── manager.py              # Central Command API (Installer & Launcher)
+├── veiw_gcode.py           # Visualize from the .gcode when the .html is too large 
 ├── inputs/                 # Drop your .svg patterns here
 ├── outputs/                # Generated G-Code (.gcode) and Visualizations (.html)
 ├── docs/                    # Research documentation, essays, and thesis
